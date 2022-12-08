@@ -1,9 +1,9 @@
-import json
 import requests
+import sqlite3
 import tkinter as tk
-from tkinter import ttk
 
 from bs4 import BeautifulSoup
+from tkinter import ttk
 
 
 class Popup:
@@ -56,21 +56,24 @@ class PopupOKCancel(Popup):
 
 class Window:
     def __init__(self):
+        self.targets = sqlite3.connect("targets.db")
+        self.t_cur = self.targets.cursor()
+        self.t_cur.execute("""CREATE TABLE IF NOT EXISTS targets(prod_name TEXT, prod_target FLOAT)""")
+
         self.root = tk.Tk()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
         self.fot = False  # force-overwrite the target
 
         self.links = []
-        with open('targets.json', 'r') as f:
-            self.targets = json.load(f)
 
         self.reqs = [requests.get(i) for i in self.links]
         self.sources = [BeautifulSoup(req.content, 'html.parser') for req in self.reqs]
 
         self.prices = [Window.find_lowest_price(source, 'span', attrs={'class': 'prc-dsc'}) for source in self.sources]
         self.prices_og = [Window.find_lowest_price(source, 'span', attrs={'class': 'prc-org'}) for source in self.sources]
-        self.target_prices = [v for k, v in self.targets.items()]
+        self.t_cur.execute('SELECT * FROM targets')
+        self.target_prices = {elmt[0]: elmt[1] for elmt in self.t_cur.fetchall()}
         self.h1 = [source.find('h1', attrs={'class': 'pr-new-br'}) for source in self.sources]
 
         self.labels = {}
@@ -119,30 +122,39 @@ class Window:
         self.prices = [self.find_lowest_price(source, 'span', attrs={'class': 'prc-dsc'}) for source in self.sources]
         self.prices_og = [source.find('span', attrs={'class': 'prc-org'}) for source in self.sources]
         self.h1 = [source.find('h1', attrs={'class': 'pr-new-br'}) for source in self.sources]
+
+        self.t_cur.execute('SELECT * FROM targets')
+        self.target_prices = {elmt[0]: elmt[1] for elmt in self.t_cur.fetchall()}
+
         name = Window.removesurrounding(self.h1[-1].find('span').text, ' ')
         price: float
 
         try:
-            if self.target_prices[-1] > self.target.get() > 0 or self.fot:
-                raise IndexError
-        except IndexError:
-            self.target_prices.append(self.target.get())
-            price = self.target_prices[-1]
-            self.targets[name] = self.target.get()
-        self.labels[name] = ttk.Label(self.root, text=('' if self.h1[-1].find('a') is None else self.h1[-1].find('a').text + ' - ') + Window.removesurrounding(self.h1[-1].find('span').text, ' ') + ' - ' + str(self.prices[-1]) + '₺' + ('' if self.prices_og[-1] is None else ' - Original price: ' + self.prices_og[-1].text.replace('.', '').replace(' TL', '₺') + f' ({round(100 * ((float(self.prices_og[-1].text.removesuffix(" TL").replace(".", "").replace(",", ".")) / self.prices[-1]) - 1), 2)}% discount)') + ' - ' + f'Target: {self.targets[name]}₺')
+            if self.target_prices[name] > self.target.get() > 0 or self.fot:
+                self.target_prices[name] = self.target.get()
+                self.t_cur.execute(f'UPDATE targets SET prod_target = {self.target.get()} WHERE prod_name="{name}"')
+        except KeyError:
+            self.target_prices[name] = self.target.get()
+            self.t_cur.execute(f'INSERT INTO targets VALUES("{name}", {self.target.get()})')
+
+        self.labels[name] = ttk.Label(self.root, text=('' if self.h1[-1].find('a') is None else self.h1[-1].find('a').text + ' - ') + Window.removesurrounding(self.h1[-1].find('span').text, ' ') + ' - ' + str(self.prices[-1]) + '₺' + ('' if self.prices_og[-1] is None else ' - Original price: ' + self.prices_og[-1].text.replace('.', '').replace(' TL', '₺') + f' ({round(100 * ((float(self.prices_og[-1].text.removesuffix(" TL").replace(".", "").replace(",", ".")) / self.prices[-1]) - 1), 2)}% discount)') + ' - ' + f'Target: {self.target_prices[name]}₺')
+        self.t_cur.execute('SELECT * FROM targets')
 
     def clear_targets(self):
-        self.targets = {}
-        self.target_prices = []
+        with open('targets.db', 'w') as f:
+            f.write('')
+
+        self.t_cur.execute("""CREATE TABLE IF NOT EXISTS targets(prod_name TEXT, prod_target FLOAT)""")
+        self.target_prices = {}
 
     def switch(self):
-        if self.fot_text.get() == 'Enable force-overwrite target':
+        self.fot = not self.fot
+
+        if self.fot:
             self.fot_text.set('Disable force-overwrite target')
 
         else:
             self.fot_text.set('Enable force-overwrite target')
-
-        self.fot = not self.fot
 
     @staticmethod
     def removesurrounding(string: str, char: str):
@@ -171,17 +183,16 @@ class Window:
         return record
 
     def on_close(self):
-        pop_quit = PopupOKCancel(self, 'Quit', 'Would you like to quit?', self.close)
+        pop_quit = PopupOKCancel(self, 'Quit', 'Would you like to quit?', self.close)  # NOQA
 
     def launch(self):
         def pack_labels():
-            print(self.labels)
             for label in self.labels.values():
                 label.pack_forget()
                 label.pack()
 
             for price in self.prices:
-                for trpr in self.targets.items():
+                for trpr in self.target_prices.items():
                     if trpr[1] >= price:
                         pop = PopupOK(self, 'Target reached', f'Target reached for {trpr[0]}!')
                         pop.show()
@@ -192,8 +203,8 @@ class Window:
         self.root.mainloop()
 
     def close(self):
-        with open('targets.json', 'w') as f:
-            json.dump(self.targets, f)
+        self.targets.commit()
+        self.targets.close()
         self.root.destroy()
 
 
